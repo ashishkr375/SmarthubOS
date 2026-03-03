@@ -31,7 +31,18 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+- [ ] No main PostgreSQL or Grafana proposed for the Pi
+- [ ] `tenant_id` resolved from validated credential, never from request body or payload
+- [ ] `hub_id` resolved from hub API key credential, never from request field
+- [ ] NATS `TELEMETRY` stream configured with file storage (not memory)
+- [ ] All adapters normalize to Standard Event Schema before publishing to NATS
+- [ ] New protocol = new container only; no changes to existing services
+- [ ] Edge images use `FROM scratch` or distroless; no shell in container
+- [ ] Pi auth API bound to `127.0.0.1:8080` only (enforced in code)
+- [ ] No credentials in code or committed `.env` files
+- [ ] bcrypt cost ≥ 12 for all token and API-key hashes
+- [ ] NATS consumers use `AckExplicit`; `msg.Ack()` called only after confirmed delivery
+- [ ] Cloud Bridge uses exponential backoff (max 60 s) on all retries
 
 ## Project Structure
 
