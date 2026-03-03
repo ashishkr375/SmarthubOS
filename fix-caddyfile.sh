@@ -1,6 +1,16 @@
 #!/bin/bash
 # Fix Caddyfile with proper line breaks
-# ACME_EMAIL and GRAFANA_DOMAIN must be set in the .env file.
+# Auto-sources .env from the same directory if variables are not already exported.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load .env with set -a so every assignment is automatically exported to child processes
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${SCRIPT_DIR}/.env"
+  set +a
+fi
 
 if [ -z "${ACME_EMAIL}" ]; then
   echo "ERROR: ACME_EMAIL is not set. Add it to your .env file."
