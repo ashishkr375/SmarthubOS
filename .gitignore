@@ -39,3 +39,5 @@ Thumbs.db
 
 
 project_details
+
+# specs/ is intentionally tracked — feature specs are part of the project source
