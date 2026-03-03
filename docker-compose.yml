@@ -42,6 +42,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL}
+      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy-data:/data

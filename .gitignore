@@ -1,6 +1,9 @@
 # Environment variables (contains secrets)
 .env
 
+# Generated Caddyfile (created by fix-caddyfile.sh from .env values — not committed)
+Caddyfile
+
 # Python testing
 __pycache__/
 *.py[cod]
