@@ -1,0 +1,1003 @@
+openapi: "3.0.3"
+info:
+  title: SmartHubOS Cloud API
+  description: |
+    REST + WebSocket API for the SmartHubOS Cloud service.
+    Serves tenant/hub/device provisioning (JWT auth), hub telemetry ingest
+    and cache-sync (Hub API Key auth), and a persistent WebSocket command channel.
+
+    **Authentication**:
+    - User-facing endpoints: `Authorization: Bearer <access_token>` (JWT, HS256, 15 min).
+    - Hub-facing internal endpoints: `Authorization: Bearer <hub_api_key>` (raw key, bcrypt-verified).
+
+    Source of truth: CONSTITUTION.md §13.
+  version: "1.0.0"
+  contact:
+    name: SmartHubOS
+
+servers:
+  - url: https://api.smarthubos.online
+    description: Production VPS (Hetzner/DigitalOcean)
+  - url: http://localhost:9090
+    description: Local development
+
+tags:
+  - name: auth
+    description: Login and token refresh
+  - name: tenants
+    description: Tenant management (admin only)
+  - name: hubs
+    description: Hub registration and status (admin only)
+  - name: devices
+    description: Device provisioning and revocation
+  - name: telemetry
+    description: Telemetry query
+  - name: rules
+    description: Automation rules management
+  - name: hub-internal
+    description: Internal Pi-to-VPS API (Hub API Key auth)
+  - name: health
+    description: Health check
+
+components:
+  securitySchemes:
+    bearerJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: HS256 JWT access token (15 min expiry). Claims include sub, tenant_id, role.
+    hubApiKey:
+      type: http
+      scheme: bearer
+      description: Hub API key (raw key, bcrypt-verified against hubs.api_key_hash).
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "unauthorized"
+
+    Tenant:
+      type: object
+      required: [id, name, namespace, is_active, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        name:
+          type: string
+          example: "Student Lab 01"
+        namespace:
+          type: string
+          example: "lab01"
+        is_active:
+          type: boolean
+          example: true
+        created_at:
+          type: string
+          format: date-time
+
+    Hub:
+      type: object
+      required: [id, name, is_online, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "pi-01"
+        is_online:
+          type: boolean
+        last_ping:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Device:
+      type: object
+      required: [id, tenant_id, hub_id, device_name, protocol, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        hub_id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+          example: "sensor-1"
+        protocol:
+          type: string
+          enum: [mqtt, http, coap, ws]
+        status:
+          type: string
+          enum: [active, suspended, revoked]
+        last_seen:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Rule:
+      type: object
+      required: [id, tenant_id, rule_json, is_active, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        rule_json:
+          type: object
+          description: JSONLogic rule object (see CONSTITUTION.md §12)
+          example: {"if": [{">=": [{"var": "temperature"}, 30]}, "alert_high_temp", null]}
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    TelemetryEvent:
+      type: object
+      required: [time, device_id, tenant_id, protocol_src, payload]
+      properties:
+        time:
+          type: string
+          format: date-time
+        tenant_id:
+          type: string
+          format: uuid
+        hub_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        protocol_src:
+          type: string
+          enum: [mqtt, http, coap, ws]
+        payload:
+          type: object
+          description: Arbitrary sensor payload stored as JSONB
+
+    StandardEvent:
+      description: Standard Internal Event Schema (CONSTITUTION.md §7). Used for ingest.
+      type: object
+      required: [event_id, timestamp, hub_id, tenant_id, device_id, protocol_source, event_type, payload]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: integer
+          description: Unix seconds
+        hub_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        protocol_source:
+          type: string
+          enum: [mqtt, http, coap, ws]
+        event_type:
+          type: string
+          enum: [telemetry, command, shadow_update, alert, heartbeat]
+        payload:
+          type: object
+
+    CacheSyncDevice:
+      description: Device entry in the cache-sync response. Contains token_hash for Pi SQLite.
+      type: object
+      required: [device_id, tenant_id, token_hash, allowed_topics, status]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        token_hash:
+          type: string
+          description: bcrypt hash of the device token. Used by Pi for offline auth.
+        allowed_topics:
+          type: array
+          items:
+            type: string
+          example: ["tenant.lab01.telemetry.sensor-uuid"]
+        status:
+          type: string
+          enum: [active]
+
+    CacheSyncRule:
+      type: object
+      required: [rule_id, tenant_id, rule_json, is_active]
+      properties:
+        rule_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        rule_json:
+          type: object
+        is_active:
+          type: boolean
+
+paths:
+  # ─────────────────────────────────────────────────────────
+  # AUTH
+  # ─────────────────────────────────────────────────────────
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Login
+      description: Returns a signed HS256 JWT access token (15 min) and a refresh token (7 days).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "admin@smarthubos.online"
+                password:
+                  type: string
+                  example: "supersecret"
+      responses:
+        "200":
+          description: Tokens returned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, refresh_token]
+                properties:
+                  access_token:
+                    type: string
+                    description: JWT (HS256, 15 min). Claims include sub, tenant_id, role.
+                  refresh_token:
+                    type: string
+                    description: Opaque 32-byte hex token (7 day expiry). Store server-side.
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh access token
+      description: |
+        Rotates the access token. The presented refresh token is revoked and a new one is
+        issued. Old refresh token cannot be reused.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        "200":
+          description: New access token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, refresh_token]
+                properties:
+                  access_token:
+                    type: string
+                  refresh_token:
+                    type: string
+        "401":
+          description: Token expired, revoked, or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ─────────────────────────────────────────────────────────
+  # TENANTS
+  # ─────────────────────────────────────────────────────────
+
+  /api/v1/tenants:
+    get:
+      tags: [tenants]
+      summary: List all tenants
+      security:
+        - bearerJWT: []
+      responses:
+        "200":
+          description: Array of tenants
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tenant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      tags: [tenants]
+      summary: Create tenant
+      description: |
+        Creates a tenant. Also provisions a Grafana Organization for the tenant (FR-011).
+        Returns 409 if `namespace` is already taken.
+      security:
+        - bearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: "Student Lab 01"
+                namespace:
+                  type: string
+                  description: Optional. Auto-generated from name if omitted.
+                  example: "lab01"
+      responses:
+        "201":
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Namespace already taken
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "namespace_conflict"
+
+  /api/v1/tenants/{id}:
+    get:
+      tags: [tenants]
+      summary: Get tenant by ID
+      security:
+        - bearerJWT: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ─────────────────────────────────────────────────────────
+  # HUBS
+  # ─────────────────────────────────────────────────────────
+
+  /api/v1/hubs:
+    get:
+      tags: [hubs]
+      summary: List all hubs with online status
+      security:
+        - bearerJWT: []
+      responses:
+        "200":
+          description: Array of hubs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Hub"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/hubs/register:
+    post:
+      tags: [hubs]
+      summary: Register new Pi hub
+      description: |
+        Creates a hub record and generates a random 32-byte API key. The raw key is
+        returned ONCE in the response. The stored value is `bcrypt(api_key, cost=12)`.
+        The raw key cannot be retrieved again.
+      security:
+        - bearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: "pi-01"
+      responses:
+        "201":
+          description: Hub registered. Store the api_key — it is shown only once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hub_id, name, api_key]
+                properties:
+                  hub_id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  api_key:
+                    type: string
+                    description: Plaintext API key. STORE THIS. It will never be shown again.
+                    example: "a9f4e2b81c..."
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ─────────────────────────────────────────────────────────
+  # DEVICES
+  # ─────────────────────────────────────────────────────────
+
+  /api/v1/devices:
+    get:
+      tags: [devices]
+      summary: List devices for authenticated tenant
+      description: |
+        Returns devices scoped to the tenant extracted from the JWT claim.
+        `token_hash` is NOT included in the response.
+      security:
+        - bearerJWT: []
+      responses:
+        "200":
+          description: Array of devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Device"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [devices]
+      summary: Provision device
+      description: |
+        Creates a device under the tenant from the JWT claim.
+        Generates a 32-byte random token; returns it ONCE in plaintext.
+        Stores only `bcrypt(token, cost=12)`.
+      security:
+        - bearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hub_id, device_name, protocol]
+              properties:
+                hub_id:
+                  type: string
+                  format: uuid
+                device_name:
+                  type: string
+                  example: "sensor-1"
+                protocol:
+                  type: string
+                  enum: [mqtt, http, coap, ws]
+      responses:
+        "201":
+          description: Device provisioned. Store the token — it is shown only once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_id, tenant_id, hub_id, device_name, protocol, status, token]
+                properties:
+                  device_id:
+                    type: string
+                    format: uuid
+                  tenant_id:
+                    type: string
+                    format: uuid
+                  hub_id:
+                    type: string
+                    format: uuid
+                  device_name:
+                    type: string
+                  protocol:
+                    type: string
+                  status:
+                    type: string
+                    example: "active"
+                  token:
+                    type: string
+                    description: Plaintext device token. STORE THIS. It will never be shown again.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/devices/{id}:
+    delete:
+      tags: [devices]
+      summary: Revoke device
+      description: |
+        Sets `devices.status = 'revoked'`. Immediately pushes a revoke message to the
+        hub's WebSocket channel: `{"type":"revoke","device_id":"<uuid>"}`.
+        Idempotent: if device is already revoked, returns 200 OK.
+      security:
+        - bearerJWT: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Device revoked (or was already revoked)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_id:
+                    type: string
+                  status:
+                    type: string
+                    example: "revoked"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/devices/{id}/command:
+    post:
+      tags: [devices]
+      summary: Send command to device via hub WebSocket
+      description: |
+        Queues a command for the device. If the hub WebSocket is connected, the command
+        is pushed immediately. If the hub is offline, the command is buffered for up to
+        5 minutes (TTL, per §10.1C of CONSTITUTION.md).
+      security:
+        - bearerJWT: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [payload]
+              properties:
+                payload:
+                  type: object
+                  description: Arbitrary command payload for the device
+                  example: {"action": "toggle", "state": true}
+      responses:
+        "202":
+          description: Command accepted (may be buffered if hub is offline)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [delivered, buffered_hub_offline]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ─────────────────────────────────────────────────────────
+  # TELEMETRY
+  # ─────────────────────────────────────────────────────────
+
+  /api/v1/telemetry:
+    get:
+      tags: [telemetry]
+      summary: Query telemetry
+      description: Returns telemetry events for the authenticated tenant. Supports time-range and device filters.
+      security:
+        - bearerJWT: []
+      parameters:
+        - in: query
+          name: device_id
+          schema:
+            type: string
+            format: uuid
+          description: Filter by device UUID
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date-time
+          description: Start of time range (inclusive). Defaults to 24 hours ago.
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+          description: End of time range (inclusive). Defaults to now.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 1000
+            maximum: 10000
+      responses:
+        "200":
+          description: Telemetry events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TelemetryEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ─────────────────────────────────────────────────────────
+  # RULES
+  # ─────────────────────────────────────────────────────────
+
+  /api/v1/rules:
+    get:
+      tags: [rules]
+      summary: List rules for authenticated tenant
+      security:
+        - bearerJWT: []
+      responses:
+        "200":
+          description: Array of rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Rule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [rules]
+      summary: Create automation rule
+      security:
+        - bearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule_json]
+              properties:
+                rule_json:
+                  type: object
+                  description: JSONLogic rule object
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/rules/{id}:
+    put:
+      tags: [rules]
+      summary: Update rule
+      security:
+        - bearerJWT: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rule_json:
+                  type: object
+                is_active:
+                  type: boolean
+      responses:
+        "200":
+          description: Rule updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [rules]
+      summary: Delete rule
+      security:
+        - bearerJWT: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Rule deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ─────────────────────────────────────────────────────────
+  # INTERNAL HUB API (Hub API Key auth)
+  # ─────────────────────────────────────────────────────────
+
+  /internal/hub/ingest:
+    post:
+      tags: [hub-internal]
+      summary: Receive telemetry batch from Pi Cloud Bridge
+      description: |
+        Accepts up to 100 Standard Event Schema objects per request.
+        All events must pass validation — the entire batch is rejected if any event is invalid (no partial writes).
+        Uses pgx Batch for single-transaction bulk insert to TimescaleDB.
+      security:
+        - hubApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    $ref: "#/components/schemas/StandardEvent"
+      responses:
+        "204":
+          description: All events written to telemetry hypertable
+        "400":
+          description: Validation error (malformed event, field missing, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Hub API key belongs to a different hub than claimed in events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /internal/hub/cache-sync:
+    get:
+      tags: [hub-internal]
+      summary: Return devices and rules for this hub's tenant
+      description: |
+        Returns all `active` devices and `is_active` rules scoped to the hub's tenant.
+        Cross-tenant data is never returned. Called every 60 seconds by Cloud Bridge.
+        Includes `token_hash` in the device entries (needed by Pi for offline bcrypt auth).
+      security:
+        - hubApiKey: []
+      responses:
+        "200":
+          description: Cache sync payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices, rules, synced_at]
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CacheSyncDevice"
+                  rules:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CacheSyncRule"
+                  synced_at:
+                    type: string
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /internal/hub/heartbeat:
+    post:
+      tags: [hub-internal]
+      summary: Hub heartbeat
+      description: |
+        Called by Cloud Bridge every 30 seconds. Sets `hubs.is_online = true` and
+        `hubs.last_ping = NOW()`. A background job sets `is_online = false` if no
+        heartbeat arrives within 2 minutes.
+      security:
+        - hubApiKey: []
+      responses:
+        "204":
+          description: Heartbeat recorded
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /hub/ws:
+    get:
+      tags: [hub-internal]
+      summary: Persistent WebSocket channel (hub connection)
+      description: |
+        Hub upgrades HTTP to WebSocket using `Authorization: Bearer <hub_api_key>` in
+        the upgrade request. The connection is maintained indefinitely.
+
+        **Server → Hub messages** (JSON):
+        - Command: `{"type":"command","tenant_id":"…","device_id":"…","payload":{…}}`
+        - Revoke:  `{"type":"revoke","device_id":"…"}`
+
+        **Hub → Server messages**:
+        - Ping (Go managed, no application-level ping required).
+
+        On disconnect, pending commands are buffered for 5 minutes (TTL).
+      security:
+        - hubApiKey: []
+      responses:
+        "101":
+          description: Switching Protocols (WebSocket upgrade successful)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ─────────────────────────────────────────────────────────
+  # HEALTH
+  # ─────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Returns DB reachability status. Used by Docker HEALTHCHECK and load balancer.
+      responses:
+        "200":
+          description: All systems up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  db:
+                    type: string
+                    example: "up"
+        "503":
+          description: PostgreSQL unreachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "degraded"
+                  db:
+                    type: string
+                    example: "down"
+
+components:
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT / Hub API Key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "unauthorized"
+    Forbidden:
+      description: Authenticated but insufficient role/permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "forbidden"
+    NotFound:
+      description: Resource not found or not accessible to this tenant
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "not_found"
+    BadRequest:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
