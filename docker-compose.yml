@@ -45,6 +45,9 @@ services:
     environment:
       ACME_EMAIL: ${ACME_EMAIL}
       GRAFANA_DOMAIN: ${GRAFANA_DOMAIN}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy-data:/data
