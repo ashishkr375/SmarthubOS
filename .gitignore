@@ -37,7 +37,11 @@ Thumbs.db
 # Logs
 *.log
 
+# Go build artifacts
+cloud/cloud-api/cloud-api
+*.test
+__debug_bin*
 
-project_details
+# project_details
 
 # specs/ is intentionally tracked — feature specs are part of the project source
