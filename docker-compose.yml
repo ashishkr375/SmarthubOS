@@ -19,6 +19,8 @@ services:
   grafana:
     image: grafana/grafana-oss:latest
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
@@ -36,33 +38,6 @@ services:
       timeout: 5s
       retries: 3
 
-  caddy:
-    image: caddy:latest
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      ACME_EMAIL: ${ACME_EMAIL}
-      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN}
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy-data:/data
-      - caddy-config:/config
-    networks:
-      - smarthub-network
-    depends_on:
-      grafana:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:2019/metrics || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
 networks:
   smarthub-network:
     driver: bridge
@@ -70,5 +45,3 @@ networks:
 volumes:
   postgres-data:
   grafana-data:
-  caddy-data:
-  caddy-config:
